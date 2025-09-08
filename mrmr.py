@@ -7,13 +7,13 @@ from sklearn.preprocessing import StandardScaler
 
 # ------------------ Streamlit Page Config ------------------ #
 st.set_page_config(layout="wide", page_title="MRMR Feature Selection (Regression)")
-st.title("MRMR Feature Selection (Regression)")
+st.title("MRMR Feature Selection (Regression - MI–MI Version)")
 
 st.markdown("""
 This app performs **Minimum Redundancy Maximum Relevance (mRMR)** feature selection for regression.  
 
 - **Relevance**: Mutual Information (MI) between feature and target.  
-- **Redundancy**: Average absolute correlation with already-selected features.  
+- **Redundancy**: Average Mutual Information (MI) between candidate feature and already-selected features.  
 - **Selection**: Pick features that maximize **Relevance − Redundancy**.  
 """)
 
@@ -74,12 +74,16 @@ if df is not None:
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # Relevance (MI)
+    # Relevance (MI with target)
     relevance = mutual_info_regression(X_scaled, y, random_state=0)
 
-    # Redundancy (Correlation)
-    corr_matrix = np.corrcoef(X_scaled, rowvar=False)
-    redundancy = np.abs(corr_matrix)
+    # Precompute MI between features for redundancy
+    mi_matrix = np.zeros((len(features), len(features)))
+    for i in range(len(features)):
+        for j in range(i+1, len(features)):
+            mi = mutual_info_regression(X_scaled[:, [i]], X_scaled[:, j], random_state=0)[0]
+            mi_matrix[i, j] = mi
+            mi_matrix[j, i] = mi
 
     # mRMR selection
     selected = []
@@ -97,7 +101,7 @@ if df is not None:
 
             rel = relevance[i]
             if selected:
-                red = np.mean([redundancy[i, features.index(s)] for s in selected])
+                red = np.mean([mi_matrix[i, features.index(s)] for s in selected])
             else:
                 red = 0
 
@@ -119,7 +123,7 @@ if df is not None:
         "Feature": selected,
         "Rank": range(1, len(selected)+1),
         "Relevance (MI with Target)": [relevances[f] for f in selected],
-        "Redundancy (Avg Corr with selected)": [redundancies[f] for f in selected],
+        "Redundancy (Avg MI with selected)": [redundancies[f] for f in selected],
         "mRMR Score (Rel - Red)": [scores[f] for f in selected]
     })
     st.dataframe(result_df)
@@ -127,9 +131,6 @@ if df is not None:
     # Plot Scores
     fig, ax = plt.subplots()
     ax.bar(result_df["Feature"], result_df["mRMR Score (Rel - Red)"], color="skyblue")
-    ax.set_title("mRMR Scores for Selected Features")
+    ax.set_title("mRMR Scores for Selected Features (MI–MI)")
     plt.xticks(rotation=45)
     st.pyplot(fig)
-
-    # Explanation
-    
