@@ -2,126 +2,134 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.metrics import mutual_info_score
+from sklearn.feature_selection import mutual_info_regression
+from sklearn.preprocessing import StandardScaler
 
-st.set_page_config(layout="wide", page_title="mRMR Feature Selection")
-st.title("MRMR Feature Selection ")
+# ------------------ Streamlit Page Config ------------------ #
+st.set_page_config(layout="wide", page_title="MRMR Feature Selection (Regression)")
+st.title("MRMR Feature Selection (Regression)")
 
-# ------------------ Upload Section ------------------
-uploaded_file = st.file_uploader("Upload dataset (CSV or Excel)", type=["csv", "xlsx"])
+st.markdown("""
+This app performs **Minimum Redundancy Maximum Relevance (mRMR)** feature selection for regression.  
 
-if uploaded_file:
-    # Load dataset
-    if uploaded_file.name.endswith(".csv"):
-        df = pd.read_csv(uploaded_file)
-    else:
-        df = pd.read_excel(uploaded_file)
+- **Relevance**: Mutual Information (MI) between feature and target.  
+- **Redundancy**: Average absolute correlation with already-selected features.  
+- **Selection**: Pick features that maximize **Relevance − Redundancy**.  
+""")
 
+# ------------------ Dataset Choice ------------------ #
+data_choice = st.radio(
+    "Choose dataset source",
+    ["Upload File", "Use Demo Dataset"],
+    horizontal=True
+)
+
+df = None
+
+if data_choice == "Upload File":
+    uploaded_file = st.file_uploader("Upload your dataset (CSV/XLSX)", type=["csv", "xlsx"])
+    if uploaded_file:
+        if uploaded_file.name.endswith(".csv"):
+            df = pd.read_csv(uploaded_file)
+        else:
+            df = pd.read_excel(uploaded_file)
+else:
+    # ----------- Generate Synthetic Demo Dataset ----------- #
+    np.random.seed(42)
+    n_samples = 300
+    n_features = 15
+
+    # Randomly choose 3–5 "true" features
+    n_true = np.random.randint(3, 6)
+    true_indices = np.random.choice(n_features, n_true, replace=False)
+
+    # Generate features
+    X = np.random.randn(n_samples, n_features)
+
+    # Random coefficients for true features
+    coefs = np.random.uniform(-3, 3, size=n_true)
+
+    # Target = linear combo of chosen features + noise
+    y = X[:, true_indices] @ coefs + 0.5 * np.random.randn(n_samples)
+
+    # Combine into dataframe
+    df = pd.DataFrame(X, columns=[f"X{i+1}" for i in range(n_features)])
+    df["Target"] = y
+
+    st.info(f"✅ Using demo dataset (Target depends on {n_true} true features: {[f'X{i+1}' for i in true_indices]})")
+
+# ------------------ Run if data exists ------------------ #
+if df is not None:
     st.write("### Dataset Preview")
     st.dataframe(df.head())
 
-    # Target column
-    target_col = st.selectbox("Select Target Column (Y)", df.columns)
+    # Select target
+    target = st.selectbox("Select target column (Y)", df.columns, index=len(df.columns)-1)
+    features = [col for col in df.columns if col != target]
 
-    if target_col:
-        possible_features = [c for c in df.columns if c != target_col]
-        selected_features = st.multiselect("Select Predictor Features (X)", possible_features, default=possible_features)
+    X = df[features].fillna(0).values
+    y = df[target].values
 
-        if selected_features:
-            N_features = st.number_input(
-                "Number of top features to select (N)", 
-                min_value=1, 
-                max_value=len(selected_features), 
-                value=min(10, len(selected_features)), 
-                step=1
-            )
+    # Standardize
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
 
-            if st.button("Run mRMR", type="primary"):
-                st.info("Computing mRMR scores...")
+    # Relevance (MI)
+    relevance = mutual_info_regression(X_scaled, y, random_state=0)
 
-                # ------------------ Discretize ------------------
-                def discretize_data(data_series, n_bins=10):
-                    if pd.api.types.is_numeric_dtype(data_series):
-                        try:
-                            return pd.qcut(data_series, n_bins, duplicates='drop').cat.codes
-                        except:
-                            return pd.cut(data_series, n_bins, duplicates='drop', include_lowest=True).cat.codes
-                    else:
-                        return data_series.astype('category').cat.codes
+    # Redundancy (Correlation)
+    corr_matrix = np.corrcoef(X_scaled, rowvar=False)
+    redundancy = np.abs(corr_matrix)
 
-                X = df[selected_features].copy()
-                y = df[target_col].copy()
-                X_disc = X.apply(discretize_data, n_bins=10)
-                y_disc = discretize_data(y, n_bins=10)
+    # mRMR selection
+    selected = []
+    scores, relevances, redundancies = {}, {}, {}
+    k = st.slider("Number of features to select", 1, len(features), min(5, len(features)))
 
-                # ------------------ mRMR ------------------
-                def mrmr_select(X_disc, y_disc, n_features):
-                    features = list(X_disc.columns)
-                    n_total = len(features)
+    for _ in range(k):
+        best_score = -np.inf
+        best_feature = None
+        best_rel, best_red = None, None
 
-                    relevance = {col: mutual_info_score(X_disc[col], y_disc) for col in features}
+        for i, feat in enumerate(features):
+            if feat in selected:
+                continue
 
-                    mi_matrix = np.zeros((n_total, n_total))
-                    for i in range(n_total):
-                        for j in range(i+1, n_total):
-                            val = mutual_info_score(X_disc[features[i]], X_disc[features[j]])
-                            mi_matrix[i, j] = val
-                            mi_matrix[j, i] = val
+            rel = relevance[i]
+            if selected:
+                red = np.mean([redundancy[i, features.index(s)] for s in selected])
+            else:
+                red = 0
 
-                    selected_idx = []
-                    scores, relevances, redundancies = [], [], []
-                    remaining = list(range(n_total))
+            score = rel - red
+            if score > best_score:
+                best_score = score
+                best_feature = feat
+                best_rel = rel
+                best_red = red
 
-                    for _ in range(n_features):
-                        if not selected_idx:
-                            best_idx = remaining[np.argmax([relevance[features[i]] for i in remaining])]
-                            score = relevance[features[best_idx]]
-                            redund = 0.0
-                        else:
-                            vals = []
-                            rels = []
-                            reds = []
-                            for idx in remaining:
-                                redund = np.mean([mi_matrix[idx, s] for s in selected_idx])
-                                rel = relevance[features[idx]]
-                                vals.append(rel - redund)
-                                rels.append(rel)
-                                reds.append(redund)
-                            pos = np.argmax(vals)
-                            best_idx = remaining[pos]
-                            score = vals[pos]
-                            rel = rels[pos]
-                            redund = reds[pos]
+        selected.append(best_feature)
+        scores[best_feature] = best_score
+        relevances[best_feature] = best_rel
+        redundancies[best_feature] = best_red
 
-                        selected_idx.append(best_idx)
-                        remaining.remove(best_idx)
+    # Results Table
+    st.write("### Selected Features (mRMR)")
+    result_df = pd.DataFrame({
+        "Feature": selected,
+        "Rank": range(1, len(selected)+1),
+        "Relevance (MI with Target)": [relevances[f] for f in selected],
+        "Redundancy (Avg Corr with selected)": [redundancies[f] for f in selected],
+        "mRMR Score (Rel - Red)": [scores[f] for f in selected]
+    })
+    st.dataframe(result_df)
 
-                        scores.append(score)
-                        relevances.append(relevance[features[best_idx]])
-                        redundancies.append(redund)
+    # Plot Scores
+    fig, ax = plt.subplots()
+    ax.bar(result_df["Feature"], result_df["mRMR Score (Rel - Red)"], color="skyblue")
+    ax.set_title("mRMR Scores for Selected Features")
+    plt.xticks(rotation=45)
+    st.pyplot(fig)
 
-                    return [features[i] for i in selected_idx], scores, relevances, redundancies
-
-                # Run selection
-                feats, scores, rels, reds = mrmr_select(X_disc, y_disc, N_features)
-
-                # ------------------ Results ------------------
-                results = pd.DataFrame({
-                    "Feature": feats,
-                    "Rank": range(1, len(feats)+1),
-                    "Relevance (MI with target)": rels,
-                    "Redundancy (Avg MI with selected)": reds,
-                    "mRMR_Score (Relevance - Redundancy)": scores
-                })
-
-                st.success("✅ mRMR completed")
-                st.dataframe(results)
-
-                # ------------------ Plot ------------------
-                fig, ax = plt.subplots(figsize=(8, 5))
-                ax.barh(results["Feature"], results["mRMR_Score (Relevance - Redundancy)"], color="skyblue")
-                ax.set_xlabel("mRMR Score")
-                ax.set_title("mRMR Feature Ranking")
-                ax.invert_yaxis()
-                st.pyplot(fig)
-
+    # Explanation
+    
